@@ -11,6 +11,8 @@ The TRM model uses a recursive attention mechanism with transformer architecture
 - **Training Pipeline**: Complete training loop with validation
 - **Evaluation Metrics**: Exact match and execution accuracy
 
+**Note**: The default model configuration has been optimized for the Spider dataset size (8659 training samples). The default creates a ~5.7M parameter model (vs original 49.5M) to better fit the available data.
+
 ## Installation
 
 1. Clone the repository or ensure all files are in the same directory
@@ -80,9 +82,16 @@ python main.py train \
     --batch_size 16 \
     --epochs 10 \
     --lr 1e-4 \
+    --use_constrained_decoding
+```
+
+**Note**: Default hyperparameters are optimized for the dataset size. You can override them:
+```bash
+python main.py train \
     --d_model 512 \
     --n_heads 8 \
     --n_layers 6 \
+    --dim_feedforward 2048 \
     --use_constrained_decoding
 ```
 
@@ -208,6 +217,7 @@ The evaluation script computes:
 - The current implementation uses a simple tokenizer. For better performance, consider using BERT or GPT tokenizers.
 - Execution accuracy requires generated SQLite databases with random data. Use `generate_random_data.py` to create these databases from validation schemas before evaluation.
 - The model architecture is based on the TRM principles described in the implementation plan PDF.
+- **Checkpoint Compatibility**: Checkpoints trained with older model configurations (49.5M parameters) are not compatible with the new optimized configuration (5.7M parameters). Retrain models after updating the codebase.
 
 ## References
 
