@@ -22,23 +22,34 @@ pip install -r requirements.txt
 
 ## Dataset Setup
 
-### Option 1: Manual Download (Recommended)
+### Option 1: Automated Download (Recommended)
+
+Use the automated download script that uses Hugging Face datasets:
+
+```bash
+python download_spider.py --data_dir data
+```
+
+This will automatically:
+- Install the `datasets` package if needed
+- Download the **complete Spider dataset** (8659 training examples) from Hugging Face
+- Split into train_spider.json (7000 examples) and train_others.json (1659 examples)
+- Download dev.json (1034 validation examples)
+- Provide instructions for downloading tables.json from GitHub if needed
+
+**Note**: The download script now uses `hujudev/spider-text-2-sql` which includes all training examples. You may still need to download `tables.json` manually from GitHub.
+
+### Option 2: Complete Manual Download
 
 1. Download the Spider dataset from:
    - Official repository: https://github.com/taoyds/spider
    - Kaggle: https://www.kaggle.com/datasets/jeromeblanchet/yale-universitys-spider-10-nlp-dataset
 
 2. Place the following files in `data/spider/`:
-   - `train_spider.json`
-   - `train_others.json` (optional)
-   - `dev.json`
-   - `tables.json`
-
-### Option 2: Automated Download (if implemented)
-
-```bash
-python main.py download --data_dir data
-```
+   - `train_spider.json` (7000 examples)
+   - `train_others.json` (1659 additional examples) - **Required for full training**
+   - `dev.json` (1034 examples)
+   - `tables.json` (166 database schemas)
 
 ## Usage
 
@@ -127,14 +138,17 @@ Key features:
 
 ## Configuration
 
-Default hyperparameters:
-- `d_model`: 512 (model dimension)
-- `n_heads`: 8 (attention heads)
-- `n_layers`: 6 (number of layers)
+Default hyperparameters (optimized for dataset size):
+- `d_model`: 256 (model dimension, reduced from 512 to fit 8659 samples)
+- `n_heads`: 4 (attention heads, reduced from 8)
+- `n_layers`: 3 (number of layers, reduced from 6)
+- `dim_feedforward`: 1024 (feedforward dimension, reduced from 2048)
 - `max_len`: 512 (maximum sequence length)
 - `batch_size`: 16
 - `learning_rate`: 1e-4
 - `use_constrained_decoding`: Optional flag to enable SQL grammar-constrained decoding (uses Lark parser to filter invalid tokens during generation)
+
+**Note**: Default configuration creates ~5.7M parameter model (vs original 49.5M), which is better suited for the 8659 training samples with a samples-per-parameter ratio of ~0.0015.
 
 ## Monitoring Training with TensorBoard
 

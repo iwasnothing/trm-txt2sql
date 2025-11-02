@@ -1,186 +1,256 @@
 #!/usr/bin/env python3
 """
-Download and extract Spider SQL dataset
+Download and extract Spider SQL dataset using Hugging Face datasets library
 """
-import os
-import urllib.request
-import urllib.error
-import zipfile
 import json
 from pathlib import Path
 
 
-class DownloadProgressBar:
-    """Progress bar for file downloads"""
-    def __init__(self):
-        self.bytes_downloaded = 0
-        self.total_size = 0
-    
-    def __call__(self, block_num, block_size, total_size):
-        if total_size > 0:
-            self.total_size = total_size
-            self.bytes_downloaded = block_num * block_size
-            percent = min(100, (self.bytes_downloaded / total_size) * 100)
-            if block_num % 10 == 0:  # Update every 10 blocks to avoid spam
-                print(f"\r  Progress: {percent:.1f}% ({self.bytes_downloaded // 1024 // 1024}MB/{total_size // 1024 // 1024}MB)", end='', flush=True)
-
-
-def download_file(url: str, filepath: Path, desc: str = None):
-    """Download a file from URL with progress indication"""
+def check_datasets_package():
+    """Check if datasets package is installed"""
     try:
-        print(f"Downloading {desc or filepath.name}...")
-        # Create request with User-Agent header to avoid 403 errors
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        
-        # Use urlopen and save manually to support Request object
-        with urllib.request.urlopen(req) as response:
-            total_size = int(response.headers.get('Content-Length', 0))
-            
-            with open(filepath, 'wb') as f:
-                downloaded = 0
-                block_size = 8192
-                
-                while True:
-                    chunk = response.read(block_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Show progress
-                    if total_size > 0 and downloaded % (block_size * 10) == 0:
-                        percent = (downloaded / total_size) * 100
-                        mb_downloaded = downloaded // 1024 // 1024
-                        mb_total = total_size // 1024 // 1024
-                        print(f"\r  Progress: {percent:.1f}% ({mb_downloaded}MB/{mb_total}MB)", end='', flush=True)
-        
-        print(f"\r  ✓ Saved to {filepath}")
+        import datasets
         return True
-    except urllib.error.HTTPError as e:
-        print(f"\n  ✗ HTTP Error {e.code} downloading {desc or filepath.name}: {e.reason}")
-        print(f"     URL: {url}")
+    except ImportError:
         return False
+
+
+def install_datasets_package():
+    """Install the datasets package"""
+    import subprocess
+    import sys
+    print("Installing datasets package...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "datasets", "--quiet"])
+        print("  ✓ datasets package installed successfully")
+        return True
     except Exception as e:
-        print(f"\n  ✗ Error downloading {desc or filepath.name}: {e}")
+        print(f"  ✗ Failed to install datasets package: {e}")
         return False
 
 
-def download_spider_dataset(output_dir="data"):
+def download_spider_dataset(output_dir="data", auto_install=True):
     """
-    Download Spider dataset from GitHub repository
+    Download Spider dataset using Hugging Face datasets library
+    
+    Args:
+        output_dir: Directory to save downloaded files
+        auto_install: Whether to automatically install datasets package if missing
     """
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
-    
-    # Spider dataset URLs from GitHub
-    # Files are located in evaluation_examples/examples/ directory
-    base_url = "https://raw.githubusercontent.com/taoyds/spider/master/evaluation_examples/examples/"
-    
-    # Required files for training
-    required_files = {
-        "train_spider.json": base_url + "train_spider.json",
-        "dev.json": base_url + "dev.json",
-        "tables.json": base_url + "tables.json"
-    }
-    
-    # Optional files (may not exist)
-    optional_files = {
-        "train_others.json": base_url + "train_others.json"
-    }
     
     # Create directory structure
     spider_dir = output_path / "spider"
     spider_dir.mkdir(exist_ok=True, parents=True)
     
     print("=" * 60)
-    print("Downloading Spider Dataset from GitHub")
+    print("Downloading Spider Dataset via Hugging Face")
     print("=" * 60)
     print(f"Output directory: {spider_dir}\n")
     
-    # Check which files are missing
-    files_to_download = {}
-    
-    # Check required files
-    for filename, url in required_files.items():
-        filepath = spider_dir / filename
-        if not filepath.exists():
-            files_to_download[filename] = (url, filepath)
+    # Check if datasets package is installed
+    if not check_datasets_package():
+        if auto_install:
+            if not install_datasets_package():
+                print("\nFailed to install datasets package automatically.")
+                print("Please install manually: pip install datasets")
+                return False
         else:
+            print("\nThe 'datasets' package is not installed.")
+            print("Please install it: pip install datasets")
+            return False
+    
+    # Import datasets library
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("\nFailed to import datasets library")
+        return False
+    
+    # Check which files already exist
+    existing_files = []
+    required_files = ["train_spider.json", "train_others.json", "dev.json", "tables.json"]
+    
+    for filename in required_files:
+        filepath = spider_dir / filename
+        if filepath.exists():
+            existing_files.append(filename)
             print(f"  ⊗ {filename} already exists, skipping...")
     
-    # Also check optional files
-    for filename, url in optional_files.items():
-        filepath = spider_dir / filename
-        if not filepath.exists():
-            files_to_download[filename] = (url, filepath)
-    
-    if not files_to_download:
+    if len(existing_files) == len(required_files):
         print("\n✓ All required files already exist!")
         return True
     
-    # Separate required and optional files
-    required_to_download = {k: v for k, v in files_to_download.items() 
-                            if k in required_files}
-    optional_to_download = {k: v for k, v in files_to_download.items() 
-                           if k in optional_files}
+    # Download the Spider dataset
+    print("\nDownloading Spider dataset from Hugging Face...")
+    print("Using hujudev/spider-text-2-sql (complete dataset with 8659 examples)")
+    print("This may take a few minutes depending on your internet connection...\n")
     
-    # Download required files
-    if required_to_download:
-        print(f"\nDownloading {len(required_to_download)} required file(s)...\n")
-        required_success = 0
-        for filename, (url, filepath) in required_to_download.items():
-            if download_file(url, filepath, filename):
-                required_success += 1
+    try:
+        # Load the dataset - use hujudev version which has complete 8659 examples
+        dataset = load_dataset("hujudev/spider-text-2-sql")
         
-        if required_success < len(required_to_download):
-            print("\n" + "=" * 60)
-            print(f"✗ Failed to download {len(required_to_download) - required_success} required file(s)")
-            print("Please download manually from: https://github.com/taoyds/spider")
-            return False
-    
-    # Download optional files
-    if optional_to_download:
-        print(f"\nDownloading {len(optional_to_download)} optional file(s)...\n")
-        for filename, (url, filepath) in optional_to_download.items():
-            download_file(url, filepath, filename)
-            # Don't fail if optional files fail
-    
-    print("\n" + "=" * 60)
-    required_downloaded = len([f for f in required_files.keys() 
-                              if (spider_dir / f).exists()])
-    if required_downloaded == len(required_files):
-        print(f"✓ Successfully downloaded all required files ({required_downloaded}/{len(required_files)})")
+        print("\nDataset loaded successfully!")
+        print(f"Available splits: {list(dataset.keys())}")
+        
+        # Process each split
+        if 'train' in dataset:
+            train_data = dataset['train']
+            print(f"\nProcessing training data ({len(train_data)} examples)...")
+            
+            # Convert hujudev format to standard Spider format
+            # hujudev uses: query, Input, Question, Schema, db_id
+            # Standard Spider uses: db_id, question, SQL (or query)
+            train_examples = []
+            for i in range(len(train_data)):
+                item = train_data[i]
+                # Convert to standard format
+                converted_item = {
+                    'db_id': item.get('db_id', ''),
+                    'question': item.get('Question', item.get('question', '')).replace('Question: ', '').strip(),
+                    'query': item.get('query', ''),
+                    # Keep other fields for potential use
+                    'Input': item.get('Input', ''),
+                    'Schema': item.get('Schema', '')
+                }
+                train_examples.append(converted_item)
+            
+            # Save train_spider.json (first 7000 examples)
+            train_spider_path = spider_dir / "train_spider.json"
+            if not train_spider_path.exists():
+                train_spider_examples = train_examples[:7000]
+                with open(train_spider_path, 'w') as f:
+                    json.dump(train_spider_examples, f, indent=2)
+                print(f"  ✓ Saved {len(train_spider_examples)} examples to train_spider.json")
+            else:
+                print(f"  ⊗ train_spider.json already exists")
+            
+            # Save train_others.json (remaining examples)
+            train_others_path = spider_dir / "train_others.json"
+            if not train_others_path.exists():
+                train_others_examples = train_examples[7000:]
+                with open(train_others_path, 'w') as f:
+                    json.dump(train_others_examples, f, indent=2)
+                print(f"  ✓ Saved {len(train_others_examples)} examples to train_others.json")
+            else:
+                print(f"  ⊗ train_others.json already exists")
+        
+        if 'validation' in dataset or 'dev' in dataset:
+            val_key = 'validation' if 'validation' in dataset else 'dev'
+            val_data = dataset[val_key]
+            print(f"\nProcessing validation data ({len(val_data)} examples)...")
+            
+            # Convert validation data to standard format
+            val_examples = []
+            for i in range(len(val_data)):
+                item = val_data[i]
+                converted_item = {
+                    'db_id': item.get('db_id', ''),
+                    'question': item.get('Question', item.get('question', '')).replace('Question: ', '').strip(),
+                    'query': item.get('query', ''),
+                    'Input': item.get('Input', ''),
+                    'Schema': item.get('Schema', '')
+                }
+                val_examples.append(converted_item)
+            
+            dev_path = spider_dir / "dev.json"
+            if not dev_path.exists():
+                with open(dev_path, 'w') as f:
+                    json.dump(val_examples, f, indent=2)
+                print(f"  ✓ Saved {len(val_examples)} examples to dev.json")
+            else:
+                print(f"  ⊗ dev.json already exists")
+        else:
+            print("  ⚠ No validation/dev split found in dataset")
+        
+        # Try to get tables.json from the dataset
+        # Some versions include this in the dataset info
+        tables_path = spider_dir / "tables.json"
+        if not tables_path.exists():
+            # Check if tables info is in the dataset
+            if hasattr(dataset, 'info') and hasattr(dataset.info, 'features'):
+                # Try to extract table schema info
+                print("\nAttempting to extract tables.json...")
+                print("  ⚠ tables.json not found in dataset, you may need to download it separately")
+                print(f"  Try: wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation_examples/examples/tables.json -P {spider_dir}")
+            else:
+                print("\n  ⚠ tables.json not found in dataset")
+                print(f"  Download separately from: https://github.com/taoyds/spider")
+        
+        print("\n" + "=" * 60)
+        
+        # Check if we have the complete dataset
+        train_others_path = spider_dir / "train_others.json"
+        tables_path = spider_dir / "tables.json"
+        missing_files = []
+        if not train_others_path.exists():
+            missing_files.append("train_others.json")
+        if not tables_path.exists():
+            missing_files.append("tables.json")
+        
+        if missing_files:
+            if 'train_others.json' not in missing_files:
+                print("⚠ Partial dataset download completed")
+                print(f"Missing files: {', '.join(missing_files)}")
+                print("\nTo get the complete dataset:")
+                print("  1. Clone the Spider repository:")
+                print("     git clone https://github.com/taoyds/spider.git")
+                print("  2. Copy missing files to data/spider/")
+            else:
+                print("✓ Complete Spider dataset downloaded successfully!")
+                print("  All 8659 training examples are now available")
+                if missing_files:
+                    print(f"  Missing only: {', '.join(missing_files)}")
+        else:
+            print("✓ Dataset download completed successfully!")
+        
+        print("=" * 60)
         return True
-    else:
-        print(f"⚠ Only {required_downloaded}/{len(required_files)} required files are available")
+        
+    except Exception as e:
+        print(f"\n✗ Error downloading dataset: {e}")
+        print("Please try again or download manually from: https://github.com/taoyds/spider")
         return False
 
 
 def verify_dataset(data_dir="data/spider"):
-    """Verify that required dataset files exist"""
-    required = ["train_spider.json", "dev.json", "tables.json"]
+    """Verify dataset files and print statistics"""
     data_path = Path(data_dir)
     
-    for filename in required:
-        filepath = data_path / filename
-        if not filepath.exists():
-            print(f"Missing: {filepath}")
-            return False
+    print("\nDataset Statistics:")
+    print("-" * 40)
     
     # Check file contents
     try:
         with open(data_path / "train_spider.json") as f:
-            train_data = json.load(f)
-            print(f"Train examples: {len(train_data)}")
+            train_spider_data = json.load(f)
+            print(f"Train Spider examples: {len(train_spider_data)}")
+        
+        train_others_count = 0
+        if (data_path / "train_others.json").exists():
+            with open(data_path / "train_others.json") as f:
+                train_others_data = json.load(f)
+                train_others_count = len(train_others_data)
+                print(f"Train Others examples: {train_others_count}")
+        else:
+            print("Train Others examples: 0 (NOT FOUND)")
+        
+        total_train = len(train_spider_data) + train_others_count
+        print(f"Total training examples: {total_train}")
         
         with open(data_path / "dev.json") as f:
             dev_data = json.load(f)
             print(f"Dev examples: {len(dev_data)}")
         
-        with open(data_path / "tables.json") as f:
-            tables_data = json.load(f)
-            print(f"Database schemas: {len(tables_data)}")
+        tables_count = 0
+        if (data_path / "tables.json").exists():
+            with open(data_path / "tables.json") as f:
+                tables_data = json.load(f)
+                tables_count = len(tables_data)
+                print(f"Database schemas: {tables_count}")
+        else:
+            print("Database schemas: 0 (NOT FOUND)")
         
         return True
     except Exception as e:

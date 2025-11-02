@@ -157,9 +157,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--d_model", type=int, default=512, help="Model dimension")
-    parser.add_argument("--n_heads", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--n_layers", type=int, default=6, help="Number of layers")
+    parser.add_argument("--d_model", type=int, default=256, help="Model dimension (reduced from 512 to fit dataset)")
+    parser.add_argument("--n_heads", type=int, default=4, help="Number of attention heads (reduced from 8)")
+    parser.add_argument("--n_layers", type=int, default=3, help="Number of layers (reduced from 6 to fit dataset)")
+    parser.add_argument("--dim_feedforward", type=int, default=1024, help="Feedforward dimension (reduced from 2048 to fit dataset)")
     parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     parser.add_argument("--label_smoothing", type=float, default=0.0, 
@@ -247,6 +248,7 @@ def main():
         n_heads=args.n_heads,
         n_encoder_layers=args.n_layers,
         n_decoder_layers=args.n_layers,
+        dim_feedforward=args.dim_feedforward,
         max_len=args.max_len,
         dropout=args.dropout,
         use_constrained_decoding=args.use_constrained_decoding,

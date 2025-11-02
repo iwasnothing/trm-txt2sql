@@ -28,9 +28,10 @@ def main():
     train_parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
     train_parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
     train_parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    train_parser.add_argument('--d_model', type=int, default=512, help='Model dimension')
-    train_parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
-    train_parser.add_argument('--n_layers', type=int, default=6, help='Number of layers')
+    train_parser.add_argument('--d_model', type=int, default=256, help='Model dimension (reduced to fit dataset)')
+    train_parser.add_argument('--n_heads', type=int, default=4, help='Number of attention heads')
+    train_parser.add_argument('--n_layers', type=int, default=3, help='Number of layers')
+    train_parser.add_argument('--dim_feedforward', type=int, default=1024, help='Feedforward dimension (reduced to fit dataset)')
     train_parser.add_argument('--max_len', type=int, default=512, help='Maximum sequence length')
     train_parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     train_parser.add_argument('--label_smoothing', type=float, default=0.0, 
