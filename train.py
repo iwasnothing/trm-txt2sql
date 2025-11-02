@@ -161,6 +161,13 @@ def main():
     parser.add_argument("--n_heads", type=int, default=8, help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=6, help="Number of layers")
     parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
+    parser.add_argument("--label_smoothing", type=float, default=0.0, 
+                       help="Label smoothing factor (0.0 = no smoothing, 0.1 = typical smoothing)")
+    parser.add_argument("--early_stopping_patience", type=int, default=3, 
+                       help="Number of epochs to wait before early stopping")
+    parser.add_argument("--use_constrained_decoding", action="store_true",
+                       help="Enable SQL grammar-constrained decoding during generation")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", 
                        help="Device to use")
     parser.add_argument("--log_dir", default="runs", help="Directory for TensorBoard logs")
@@ -240,18 +247,23 @@ def main():
         n_heads=args.n_heads,
         n_encoder_layers=args.n_layers,
         n_decoder_layers=args.n_layers,
-        max_len=args.max_len
+        max_len=args.max_len,
+        dropout=args.dropout,
+        use_constrained_decoding=args.use_constrained_decoding,
+        sql_tokenizer=sql_tokenizer if args.use_constrained_decoding else None
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
     
     # Loss and optimizer
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding token
+    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=args.label_smoothing)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     
     # Training loop
     best_val_loss = float('inf')
+    patience = args.early_stopping_patience  # Number of epochs to wait before stopping
+    patience_counter = 0
     global_step = 0
     
     for epoch in range(1, args.epochs + 1):
@@ -275,6 +287,10 @@ def main():
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': val_loss,
             'train_loss': train_loss,
+            'd_model': args.d_model,
+            'n_heads': args.n_heads,
+            'n_layers': args.n_layers,
+            'dropout': args.dropout,
             'question_tokenizer_vocab': dict(question_tokenizer.vocab),
             'sql_tokenizer_vocab': dict(sql_tokenizer.vocab),
         }
@@ -287,8 +303,18 @@ def main():
             best_checkpoint_path = output_path / "best_model.pt"
             torch.save(checkpoint, best_checkpoint_path)
             print(f"Saved best model (val_loss: {val_loss:.4f})")
+            patience_counter = 0  # Reset counter
             if writer is not None:
                 writer.add_scalar('Best_Validation_Loss', best_val_loss, epoch)
+        else:
+            patience_counter += 1
+            print(f"No improvement for {patience_counter} epoch(s)")
+        
+        # Early stopping check
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered after {epoch} epochs")
+            print(f"Best validation loss: {best_val_loss:.4f}")
+            break
     
     # Log hyperparameters at the end with final metrics
     if writer is not None:
@@ -300,7 +326,10 @@ def main():
                 'n_heads': args.n_heads,
                 'n_layers': args.n_layers,
                 'max_len': args.max_len,
+                'dropout': args.dropout,
+                'label_smoothing': args.label_smoothing,
                 'epochs': args.epochs,
+                'early_stopping_patience': args.early_stopping_patience,
             },
             {
                 'final_train_loss': train_loss,

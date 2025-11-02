@@ -10,6 +10,7 @@ from tqdm import tqdm
 from collections import defaultdict
 import re
 import sqlite3
+import logging
 
 from trm_model import TRMTextToSQL
 from tokenizer import SimpleTokenizer
@@ -104,7 +105,8 @@ def normalize_sql_for_database(sql: str, schema: dict) -> str:
 
 
 def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str, 
-                               generated_db_dir: str = "data/generated_databases") -> bool:
+                               generated_db_dir: str = "data/generated_databases",
+                               logger: logging.Logger = None) -> bool:
     """
     Compute execution accuracy by executing SQL queries on generated databases
     
@@ -113,6 +115,7 @@ def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str,
         gold_sql: Gold/ground truth SQL query
         db_id: Database identifier
         generated_db_dir: Directory containing generated SQLite databases
+        logger: Optional logger for detailed logging
     
     Returns:
         True if both queries return the same results, False otherwise
@@ -121,6 +124,8 @@ def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str,
     
     if not db_path.exists():
         # Database doesn't exist, cannot compute execution accuracy
+        if logger:
+            logger.warning(f"Database not found for db_id={db_id}: {db_path}")
         return False
     
     try:
@@ -134,13 +139,36 @@ def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str,
         pred_sql_normalized = normalize_sql_for_database(pred_sql, schema)
         gold_sql_normalized = normalize_sql_for_database(gold_sql, schema)
         
+        if logger:
+            logger.debug(f"db_id={db_id}: Original pred_sql: {pred_sql}")
+            logger.debug(f"db_id={db_id}: Normalized pred_sql: {pred_sql_normalized}")
+            logger.debug(f"db_id={db_id}: Normalized gold_sql: {gold_sql_normalized}")
+        
         # Execute predicted SQL
         try:
             pred_cursor = conn.execute(pred_sql_normalized)
             pred_results = [dict(row) for row in pred_cursor.fetchall()]
             pred_cols = [desc[0] for desc in pred_cursor.description] if pred_cursor.description else []
+            if logger:
+                logger.debug(f"db_id={db_id}: Pred SQL executed successfully, returned {len(pred_results)} rows")
         except sqlite3.Error as e:
             # Predicted SQL failed to execute
+            if logger:
+                logger.error(f"db_id={db_id}: Predicted SQL execution failed")
+                logger.error(f"db_id={db_id}: Error type: {type(e).__name__}")
+                logger.error(f"db_id={db_id}: Error message: {str(e)}")
+                logger.error(f"db_id={db_id}: Original pred_sql: {pred_sql}")
+                logger.error(f"db_id={db_id}: Normalized pred_sql: {pred_sql_normalized}")
+            conn.close()
+            return False
+        except Exception as e:
+            # Unexpected error during predicted SQL execution
+            if logger:
+                logger.error(f"db_id={db_id}: Unexpected error during predicted SQL execution")
+                logger.error(f"db_id={db_id}: Error type: {type(e).__name__}")
+                logger.error(f"db_id={db_id}: Error message: {str(e)}")
+                logger.error(f"db_id={db_id}: Original pred_sql: {pred_sql}")
+                logger.error(f"db_id={db_id}: Normalized pred_sql: {pred_sql_normalized}", exc_info=True)
             conn.close()
             return False
         
@@ -149,8 +177,26 @@ def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str,
             gold_cursor = conn.execute(gold_sql_normalized)
             gold_results = [dict(row) for row in gold_cursor.fetchall()]
             gold_cols = [desc[0] for desc in gold_cursor.description] if gold_cursor.description else []
+            if logger:
+                logger.debug(f"db_id={db_id}: Gold SQL executed successfully, returned {len(gold_results)} rows")
         except sqlite3.Error as e:
             # Gold SQL failed to execute
+            if logger:
+                logger.error(f"db_id={db_id}: Gold SQL execution failed")
+                logger.error(f"db_id={db_id}: Error type: {type(e).__name__}")
+                logger.error(f"db_id={db_id}: Error message: {str(e)}")
+                logger.error(f"db_id={db_id}: Original gold_sql: {gold_sql}")
+                logger.error(f"db_id={db_id}: Normalized gold_sql: {gold_sql_normalized}")
+            conn.close()
+            return False
+        except Exception as e:
+            # Unexpected error during gold SQL execution
+            if logger:
+                logger.error(f"db_id={db_id}: Unexpected error during gold SQL execution")
+                logger.error(f"db_id={db_id}: Error type: {type(e).__name__}")
+                logger.error(f"db_id={db_id}: Error message: {str(e)}")
+                logger.error(f"db_id={db_id}: Original gold_sql: {gold_sql}")
+                logger.error(f"db_id={db_id}: Normalized gold_sql: {gold_sql_normalized}", exc_info=True)
             conn.close()
             return False
         
@@ -174,15 +220,24 @@ def compute_execution_accuracy(pred_sql: str, gold_sql: str, db_id: str,
         pred_normalized = sorted([normalize_row(row, pred_cols) for row in pred_results])
         gold_normalized = sorted([normalize_row(row, gold_cols) for row in gold_results])
         
-        return pred_normalized == gold_normalized
+        match = pred_normalized == gold_normalized
+        if logger:
+            if match:
+                logger.debug(f"db_id={db_id}: Execution results match!")
+            else:
+                logger.debug(f"db_id={db_id}: Execution results differ. Pred rows: {len(pred_results)}, Gold rows: {len(gold_results)}")
+        
+        return match
         
     except Exception as e:
         # Any other error - return False
+        if logger:
+            logger.error(f"db_id={db_id}: Unexpected error in compute_execution_accuracy: {e}", exc_info=True)
         return False
 
 
 def evaluate_model(model, dataloader, question_tokenizer, sql_tokenizer, device, max_len=512,
-                   generated_db_dir: str = "data/generated_databases"):
+                   generated_db_dir: str = "data/generated_databases", logger: logging.Logger = None):
     """Evaluate model and compute metrics"""
     model.eval()
     
@@ -213,12 +268,15 @@ def evaluate_model(model, dataloader, question_tokenizer, sql_tokenizer, device,
                 sql_ids = [tid for tid in sql_ids if tid != 0 and tid != 2]
                 pred_sql = sql_tokenizer.decode(sql_ids[1:])  # Skip start token
                 
+                # Print predicted SQL right after model prediction
+                print(f"\n[Prediction] pred_sql: {pred_sql}")
+                
                 gold_sql = batch['sql_text'][i]
                 db_id = batch['db_id'][i]
                 
                 # Compute metrics
                 em = compute_exact_match(pred_sql, gold_sql)
-                exec_acc = compute_execution_accuracy(pred_sql, gold_sql, db_id, generated_db_dir)
+                exec_acc = compute_execution_accuracy(pred_sql, gold_sql, db_id, generated_db_dir, logger=logger)
                 
                 exact_matches += em
                 execution_acc += exec_acc
@@ -251,8 +309,21 @@ def main():
     parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                        help="Device to use")
+    parser.add_argument("--use_constrained_decoding", action="store_true",
+                       help="Enable SQL grammar-constrained decoding during generation")
     
     args = parser.parse_args()
+    
+    # Set up logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('evaluation.log'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger('evaluation')
     
     # Load checkpoint
     checkpoint_path = Path(args.checkpoint)
@@ -285,7 +356,10 @@ def main():
         n_heads=checkpoint.get('n_heads', 8),
         n_encoder_layers=checkpoint.get('n_layers', 6),
         n_decoder_layers=checkpoint.get('n_layers', 6),
-        max_len=args.max_len
+        max_len=args.max_len,
+        dropout=checkpoint.get('dropout', 0.1),
+        use_constrained_decoding=args.use_constrained_decoding,
+        sql_tokenizer=sql_tokenizer if args.use_constrained_decoding else None
     ).to(device)
     
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -307,9 +381,10 @@ def main():
     # Evaluate
     print("\nEvaluating model...")
     print(f"Using generated databases from: {args.generated_db_dir}")
+    logger.info("Starting evaluation")
     exact_match_acc, exec_acc, results = evaluate_model(
         model, val_loader, question_tokenizer, sql_tokenizer, device, args.max_len,
-        generated_db_dir=args.generated_db_dir
+        generated_db_dir=args.generated_db_dir, logger=logger
     )
     
     # Print results

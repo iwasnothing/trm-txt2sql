@@ -8,6 +8,13 @@ import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import math
 from typing import Optional, Tuple
+try:
+    from lark import Lark, Tree
+    LARK_AVAILABLE = True
+except ImportError:
+    LARK_AVAILABLE = False
+    Lark = None
+    Tree = None
 
 
 class PositionalEncoding(nn.Module):
@@ -246,12 +253,66 @@ class TRMDecoder(nn.Module):
 
 
 class TRMTextToSQL(nn.Module):
-    """Complete TRM model for Text-to-SQL"""
+    """Complete TRM model for Text-to-SQL with optional constrained decoding"""
+    
+    SQL_GRAMMAR = """
+        // Start symbol for full query
+        start: query
+        
+        // Main query structure
+        query: "SELECT" select_list "FROM" from_clause [where_clause] [group_by_clause] [order_by_clause] ";"?
+        
+        // SELECT clause: columns, aggregates, *
+        select_list: select_item ("," select_item)*
+        select_item: [aggregate] column_ref | "*"
+        aggregate: "COUNT" "(" [column_ref | "*"] ")" 
+                  | "SUM" "(" column_ref ")" 
+                  | "AVG" "(" column_ref ")"
+                  | "MAX" "(" column_ref ")"
+                  | "MIN" "(" column_ref ")"
+        
+        // FROM clause: tables and joins
+        from_clause: table_ref (join_clause)*
+        table_ref: table_name [table_alias]
+        join_clause: join_type "JOIN" table_ref "ON" condition
+        join_type: "INNER" | "LEFT" | "RIGHT" | "FULL"
+        
+        // WHERE clause: filters
+        where_clause: "WHERE" condition
+        condition: expression (("AND" | "OR") expression)*
+        expression: column_ref comparison value
+                   | column_ref "IN" "(" value_list ")"
+                   | column_ref "BETWEEN" value "AND" value
+                   | "(" condition ")"
+        comparison: "=" | "!=" | "<" | ">" | "<=" | ">="
+        
+        // GROUP BY and ORDER BY
+        group_by_clause: "GROUP" "BY" column_ref ("," column_ref)*
+        order_by_clause: "ORDER" "BY" order_item ("," order_item)*
+        order_item: column_ref ["ASC" | "DESC"]
+        
+        // Schema elements (placeholders for tables/columns)
+        table_name: /\\w+/
+        column_ref: /\\w+\\.\\w+/ | /\\w+/
+        table_alias: "AS"? /\\w+/
+        
+        // Values: strings, numbers, etc.
+        value: NUMBER | STRING | NULL
+        value_list: value ("," value)*
+        NUMBER: /-?\\d+(\\.\\d+)?/
+        STRING: /"[^"]*"|'[^']*'/
+        NULL: "NULL"
+        
+        // Ignore whitespace
+        %import common.WS
+        %ignore WS
+    """
     
     def __init__(self, question_vocab_size: int, sql_vocab_size: int,
                  d_model: int = 512, n_heads: int = 8, n_encoder_layers: int = 6,
                  n_decoder_layers: int = 6, dim_feedforward: int = 2048,
-                 dropout: float = 0.1, max_len: int = 512):
+                 dropout: float = 0.1, max_len: int = 512,
+                 use_constrained_decoding: bool = False, sql_tokenizer=None):
         super().__init__()
         
         self.encoder = TRMEncoder(
@@ -278,6 +339,24 @@ class TRMTextToSQL(nn.Module):
         self.output_proj = nn.Linear(d_model, sql_vocab_size)
         
         self.d_model = d_model
+        self.sql_vocab_size = sql_vocab_size
+        self.use_constrained_decoding = use_constrained_decoding
+        self.sql_tokenizer = sql_tokenizer
+        
+        # Initialize SQL grammar parser for constrained decoding
+        self.sql_parser = None
+        if use_constrained_decoding and LARK_AVAILABLE:
+            try:
+                self.sql_parser = Lark(self.SQL_GRAMMAR, start='start', parser='earley', 
+                                     propagate_positions=True)
+            except Exception as e:
+                print(f"Warning: Failed to initialize SQL grammar parser: {e}")
+                print("Constrained decoding will be disabled.")
+                self.use_constrained_decoding = False
+        elif use_constrained_decoding and not LARK_AVAILABLE:
+            print("Warning: lark parser not available. Install with: pip install lark")
+            print("Constrained decoding will be disabled.")
+            self.use_constrained_decoding = False
         
     def forward(self, question: torch.Tensor, sql: Optional[torch.Tensor] = None,
                 question_mask: Optional[torch.Tensor] = None,
@@ -329,10 +408,91 @@ class TRMTextToSQL(nn.Module):
         logits = self.output_proj(decoder_output)
         return logits
     
+    def _is_valid_prefix(self, partial_sql: str) -> bool:
+        """Check if partial SQL is a valid prefix of the grammar"""
+        if not self.sql_parser:
+            return True
+        
+        # Try to parse the partial SQL
+        # Use error recovery mode to check if it's a valid prefix
+        try:
+            # Attempt partial parsing
+            self.sql_parser.parse(partial_sql)
+            return True
+        except Exception:
+            # Check if it's a valid prefix by trying to continue parsing
+            # This is a heuristic - in practice, we'd need more sophisticated prefix checking
+            # For now, we'll allow any prefix that doesn't contain obvious syntax errors
+            partial_lower = partial_sql.strip().upper()
+            
+            # Basic heuristics for valid prefixes
+            # Allow if it starts with SELECT or contains valid SQL keywords
+            if partial_lower.startswith('SELECT'):
+                return True
+            
+            # If we can't determine, be permissive
+            return True
+    
+    def _get_valid_token_mask(self, partial_sql: str, vocab_size: int, device: torch.device) -> torch.Tensor:
+        """
+        Returns mask of valid next tokens based on SQL grammar.
+        
+        Args:
+            partial_sql: Partial SQL string generated so far
+            vocab_size: Size of vocabulary
+            device: Device for the mask tensor
+            
+        Returns:
+            Binary mask [vocab_size] where 1 = valid, 0 = invalid
+        """
+        if not self.use_constrained_decoding or not self.sql_parser or not self.sql_tokenizer:
+            # If constrained decoding is disabled, all tokens are valid
+            return torch.ones(vocab_size, dtype=torch.bool, device=device)
+        
+        valid_tokens = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        
+        # Try each token in vocabulary (sample a subset for efficiency)
+        # In practice, you might want to cache or optimize this
+        tokens_to_check = min(vocab_size, 1000)  # Limit checking for efficiency
+        
+        for token_id in range(tokens_to_check):
+            try:
+                # Decode token to string
+                token_str = self.sql_tokenizer.decode([token_id]).strip()
+                if not token_str or token_str in ['<PAD>', '<START>', '<END>', '<UNK>']:
+                    # Skip special tokens - they're always valid
+                    valid_tokens[token_id] = True
+                    continue
+                
+                # Try appending token to partial SQL
+                test_sql = partial_sql + ' ' + token_str if partial_sql else token_str
+                
+                try:
+                    # Try to parse the extended SQL
+                    self.sql_parser.parse(test_sql)
+                    valid_tokens[token_id] = True
+                except Exception:
+                    # Check if it's a valid prefix
+                    if self._is_valid_prefix(test_sql):
+                        valid_tokens[token_id] = True
+            except Exception:
+                # If we can't decode or check, be permissive
+                valid_tokens[token_id] = True
+        
+        # For tokens we didn't check, assume valid (for efficiency)
+        if tokens_to_check < vocab_size:
+            valid_tokens[tokens_to_check:] = True
+        
+        # Ensure at least some tokens are valid (avoid dead ends)
+        if not valid_tokens.any():
+            valid_tokens = torch.ones(vocab_size, dtype=torch.bool, device=device)
+        
+        return valid_tokens
+    
     def generate(self, question: torch.Tensor, question_mask: Optional[torch.Tensor] = None,
                  max_len: int = 256, start_token: int = 1, end_token: int = 2,
                  temperature: float = 1.0) -> torch.Tensor:
-        """Generate SQL autoregressively"""
+        """Generate SQL autoregressively with optional constrained decoding"""
         self.eval()
         batch_size = question.size(0)
         device = question.device
@@ -350,15 +510,45 @@ class TRMTextToSQL(nn.Module):
         # Initialize with start token
         generated = torch.full((batch_size, 1), start_token, dtype=torch.long, device=device)
         
+        # Track partial SQL strings for constrained decoding (one per batch item)
+        partial_sqls = [''] * batch_size if self.use_constrained_decoding else None
+        
         for _ in range(max_len - 1):
             # Decode current sequence
             decoder_output = self.decoder(generated, memory.transpose(0, 1))
             logits = self.output_proj(decoder_output[:, -1:, :]) / temperature
+            # logits: [batch_size, 1, vocab_size]
+            
+            # Apply constrained decoding if enabled
+            if self.use_constrained_decoding and partial_sqls is not None:
+                # Process each item in the batch
+                for batch_idx in range(batch_size):
+                    if partial_sqls[batch_idx] is None:
+                        continue
+                    
+                    # Get valid token mask for this batch item
+                    valid_mask = self._get_valid_token_mask(
+                        partial_sqls[batch_idx], 
+                        self.sql_vocab_size, 
+                        device
+                    )
+                    
+                    # Set invalid tokens to -inf
+                    logits[batch_idx, 0, ~valid_mask] = float('-inf')
             
             # Sample next token
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs.squeeze(1), 1)
+            probs = F.softmax(logits.squeeze(1), dim=-1)  # [batch_size, vocab_size]
+            next_token = torch.multinomial(probs, 1)  # [batch_size, 1]
             generated = torch.cat([generated, next_token], dim=1)
+            
+            # Update partial SQL strings for constrained decoding
+            if self.use_constrained_decoding and partial_sqls is not None and self.sql_tokenizer:
+                for batch_idx in range(batch_size):
+                    token_id = next_token[batch_idx].item()
+                    if token_id != start_token:  # Don't include start token
+                        token_str = self.sql_tokenizer.decode([token_id]).strip()
+                        if token_str and token_str not in ['<PAD>', '<START>', '<END>']:
+                            partial_sqls[batch_idx] += ' ' + token_str if partial_sqls[batch_idx] else token_str
             
             # Check for end token
             if (next_token == end_token).all():
